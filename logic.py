@@ -3,10 +3,19 @@
 при злокачественных новообразованиях почек у детей.
 
 Основано на данных диссертационного исследования.
+Версия 2.0 — с трёхуровневой системой рекомендаций и учётом консилиума.
 """
 
 from dataclasses import dataclass, field
 from typing import List
+
+
+# =============================================================
+# Уровни рекомендаций
+# =============================================================
+LEVEL_STANDARD = "Стандартные показания"
+LEVEL_EXTENDED = "Расширенные показания — требуется мультидисциплинарный консилиум"
+LEVEL_CONTRAINDICATED = "Противопоказано"
 
 
 @dataclass
@@ -41,18 +50,13 @@ class PatientData:
 class Decision:
     """Результат принятия решения."""
     operation_type: str = ""          # "Нефрэктомия" | "Резекция почки"
+    operation_level: str = ""         # Уровень рекомендации для типа операции
     access: str = ""                  # "Лапароскопический" | "Открытый"
-    confidence: str = ""              # "Стандартные показания" | "Расширенные показания" | "Экспертный уровень"
+    access_level: str = ""            # Уровень рекомендации для доступа
     pros: List[str] = field(default_factory=list)
     cons: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
-
-
-def calc_bsa(weight_kg: float, height_cm: float) -> float:
-    """Расчёт площади поверхности тела по формуле Мостеллера."""
-    if weight_kg <= 0 or height_cm <= 0:
-        return 0.0
-    return round(((weight_kg * height_cm) / 3600) ** 0.5, 2)
+    consilium_required: bool = False  # флаг: нужен ли консилиум
 
 
 # =============================================================
@@ -64,189 +68,277 @@ MIN_RESIDUAL_PARENCHYMA = 66          # %
 MIN_MARGIN_MM = 5                     # мм
 
 
-def decide_operation_type(pt: PatientData) -> tuple[str, List[str]]:
-    """
-    ШАГ 1: Определение типа операции (нефрэктомия / резекция).
-    """
-    reasons = []
+def calc_bsa(weight_kg: float, height_cm: float) -> float:
+    """Расчёт площади поверхности тела по формуле Мостеллера."""
+    if weight_kg <= 0 or height_cm <= 0:
+        return 0.0
+    return round(((weight_kg * height_cm) / 3600) ** 0.5, 2)
 
-    # Абсолютные показания к нефрэктомии
+
+# =============================================================
+# ШАГ 1: Определение типа операции (нефрэктомия / резекция)
+# =============================================================
+def decide_operation_type(pt: PatientData):
+    """
+    Возвращает: operation_type, level, pros, cons, warnings
+    """
+    pros, cons, warnings = [], [], []
+
+    # АБСОЛЮТНЫЕ противопоказания к резекции
     if pt.hilum_invasion:
-        reasons.append("❌ Инвазия в структуры ворот почки")
-        return "Нефрэктомия", reasons
+        cons.append("Инвазия в структуры ворот почки — резекция технически невозможна")
+        return "Нефрэктомия", LEVEL_STANDARD, pros, cons, warnings
 
     if pt.tumor_thrombus:
-        reasons.append("❌ Опухолевый тромбоз")
-        return "Нефрэктомия", reasons
+        cons.append("Опухолевый тромбоз — резекция противопоказана")
+        return "Нефрэктомия", LEVEL_STANDARD, pros, cons, warnings
 
     if pt.vessel_invasion:
-        reasons.append("❌ Инвазия в магистральные сосуды")
-        return "Нефрэктомия", reasons
+        cons.append("Инвазия в магистральные сосуды — резекция противопоказана")
+        return "Нефрэктомия", LEVEL_STANDARD, pros, cons, warnings
 
-    # Условия для резекции
     if pt.residual_parenchyma_pct < MIN_RESIDUAL_PARENCHYMA:
-        reasons.append(
-            f"❌ Сохраняемая паренхима ({pt.residual_parenchyma_pct}%) "
-            f"меньше минимального порога {MIN_RESIDUAL_PARENCHYMA}%"
+        cons.append(
+            f"Сохраняемая паренхима ({pt.residual_parenchyma_pct}%) "
+            f"меньше порога {MIN_RESIDUAL_PARENCHYMA}% — резекция нецелесообразна"
         )
-        return "Нефрэктомия", reasons
+        return "Нефрэктомия", LEVEL_STANDARD, pros, cons, warnings
 
     if pt.margin_5mm_possible == "Нет":
-        reasons.append(f"❌ Невозможен отступ ≥{MIN_MARGIN_MM} мм от края опухоли")
-        return "Нефрэктомия", reasons
+        cons.append(
+            f"Невозможен отступ >={MIN_MARGIN_MM} мм от края опухоли — "
+            f"резекция не обеспечит онкологической радикальности"
+        )
+        return "Нефрэктомия", LEVEL_STANDARD, pros, cons, warnings
 
-    # Центральная локализация чаще требует нефрэктомии
-    if pt.localization == "Центральная":
-        reasons.append("⚠️ Центральная локализация — чаще требует нефрэктомии")
-        return "Нефрэктомия", reasons
-
-    # Смешанная локализация — тоже осторожно
-    if pt.localization == "Смешанная":
-        reasons.append("⚠️ Смешанная локализация (вовлечение центра и полюса)")
-        return "Нефрэктомия", reasons
-
-    # Все условия для резекции соблюдены
-    reasons.append("✅ Периферическая локализация опухоли")
-    reasons.append(f"✅ Сохраняемая паренхима ≥{MIN_RESIDUAL_PARENCHYMA}%")
+    # Положительные факторы для резекции
+    pros.append(f"Сохраняемая паренхима {pt.residual_parenchyma_pct}% (>={MIN_RESIDUAL_PARENCHYMA}%)")
     if pt.margin_5mm_possible == "Да":
-        reasons.append(f"✅ Возможен отступ ≥{MIN_MARGIN_MM} мм")
+        pros.append(f"Возможен отступ >={MIN_MARGIN_MM} мм от края опухоли")
 
-    return "Резекция почки", reasons
+    # Расширенные показания (требуют консилиума)
+    if pt.localization == "Полюсная":
+        pros.append("Периферическая (полюсная) локализация — оптимально для резекции")
+        return "Резекция почки", LEVEL_STANDARD, pros, cons, warnings
+
+    if pt.localization == "Центральная":
+        warnings.append(
+            "Центральная локализация опухоли — резекция технически сложна, "
+            "но возможна при благоприятных анатомических условиях. "
+            "Решение принимается мультидисциплинарным консилиумом."
+        )
+        return "Резекция почки", LEVEL_EXTENDED, pros, cons, warnings
+
+    if pt.localization == "Смешанная":
+        warnings.append(
+            "Смешанная локализация (вовлечение полюса и центра) — резекция возможна, "
+            "но требует индивидуальной оценки анатомических условий. "
+            "Решение принимается мультидисциплинарным консилиумом."
+        )
+        return "Резекция почки", LEVEL_EXTENDED, pros, cons, warnings
+
+    return "Резекция почки", LEVEL_STANDARD, pros, cons, warnings
 
 
-def decide_access_nephrectomy(pt: PatientData) -> tuple[str, str, List[str], List[str], List[str]]:
+# =============================================================
+# ШАГ 2а: Определение доступа при нефрэктомии
+# =============================================================
+def decide_access_nephrectomy(pt: PatientData):
     """
-    ШАГ 2 (для нефрэктомии): Определение доступа.
-    Возвращает: access, confidence, pros, cons, warnings
+    Возвращает: access, level, pros, cons, warnings
     """
     pros, cons, warnings = [], [], []
 
-    # Абсолютные противопоказания к лапароскопии
+    # АБСОЛЮТНЫЕ противопоказания к лапароскопии
     if pt.tumor_thrombus:
-        cons.append("❌ Опухолевый тромбоз — противопоказание к лапароскопии")
-        return "Открытый", "", pros, cons, warnings
+        cons.append("Опухолевый тромбоз — абсолютное противопоказание к лапароскопии")
+        return "Открытый", LEVEL_STANDARD, pros, cons, warnings
 
     if pt.vessel_invasion:
-        cons.append("❌ Инвазия в магистральные сосуды")
-        return "Открытый", "", pros, cons, warnings
+        cons.append("Инвазия в магистральные сосуды — противопоказание к лапароскопии")
+        return "Открытый", LEVEL_STANDARD, pros, cons, warnings
 
-    if pt.side == "Билатеральная":
-        cons.append("❌ Билатеральное поражение")
-        return "Открытый", "", pros, cons, warnings
+    # Относительные факторы — требуют консилиума
+    extended_flags = []
 
-    # Оценка объёма
     if pt.tumor_volume > NEPHRECTOMY_LAP_MAX_VOLUME:
         cons.append(
-            f"❌ Объём опухоли ({pt.tumor_volume:.1f} см³) превышает "
+            f"Объём опухоли ({pt.tumor_volume:.1f} см³) превышает "
             f"рекомендованный порог для лапароскопии ({NEPHRECTOMY_LAP_MAX_VOLUME} см³)"
         )
-        return "Открытый", "", pros, cons, warnings
+        return "Открытый", LEVEL_STANDARD, pros, cons, warnings
     else:
         pros.append(
-            f"✅ Объём опухоли ({pt.tumor_volume:.1f} см³) — в пределах "
-            f"рекомендованного порога (≤{NEPHRECTOMY_LAP_MAX_VOLUME} см³)"
+            f"Объём опухоли ({pt.tumor_volume:.1f} см³) — в пределах "
+            f"рекомендованного порога (<={NEPHRECTOMY_LAP_MAX_VOLUME} см³)"
         )
 
-    # Дополнительные положительные факторы
-    if pt.localization == "Полюсная":
-        pros.append("✅ Периферическая локализация (благоприятно)")
-    if pt.has_cystic:
-        pros.append("✅ Наличие кистозного компонента (допустимо в расширенных критериях)")
+    # Проверка расширенных факторов
+    if pt.side == "Билатеральная":
+        extended_flags.append("билатеральное поражение")
         warnings.append(
-            "⚠️ При кистозном компоненте требуется особая осторожность "
-            "при мобилизации для предотвращения разрыва капсулы"
+            "Билатеральное поражение — лапароскопическая нефрэктомия возможна, "
+            "но требует сложной хирургической тактики. Решение принимается консилиумом."
         )
+
+    if pt.localization == "Полюсная":
+        extended_flags.append("периферическая локализация")
+        pros.append("Периферическая локализация опухоли (расширенные критерии)")
+
+    if pt.has_cystic:
+        extended_flags.append("кистозный компонент")
+        pros.append("Наличие кистозного компонента (расширенные критерии)")
+        warnings.append(
+            "Кистозный компонент — требуется особая осторожность при мобилизации "
+            "для предотвращения разрыва капсулы опухоли."
+        )
+
     if pt.chemo_response == "Слабый":
-        pros.append("✅ Слабый ответ на ПХТ — допустимо в расширенных критериях")
+        extended_flags.append("слабый ответ на ПХТ")
+        pros.append("Слабый ответ на ПХТ (расширенные критерии)")
+
+    if pt.distant_mets:
+        extended_flags.append("отдалённые метастазы")
+        warnings.append(
+            "Наличие отдалённых метастазов — тактика согласовывается с онкологом; "
+            "выбор доступа обсуждается на консилиуме."
+        )
 
     # Определение уровня рекомендации
-    is_extended = (
-        pt.has_cystic
-        or pt.localization == "Полюсная"
-        or pt.chemo_response == "Слабый"
-    )
-
-    if is_extended:
-        confidence = "Расширенные критерии (за пределами протокола SIOP-RTSG UMBRELLA 2016)"
+    if extended_flags:
+        level = LEVEL_EXTENDED
         warnings.append(
-            "⚠️ Данный пациент отвечает расширенным критериям минимально инвазивного "
-            "доступа — рекомендуется выполнение в специализированном центре."
+            "Данный пациент отвечает расширенным критериям минимально инвазивного доступа "
+            "(за пределами протокола SIOP-RTSG UMBRELLA 2016). Рекомендуется выполнение "
+            "в специализированном центре с обязательным решением мультидисциплинарного консилиума."
         )
     else:
-        confidence = "Стандартные показания (в соответствии с протоколом SIOP-RTSG UMBRELLA 2016)"
+        level = LEVEL_STANDARD
 
-    return "Лапароскопический", confidence, pros, cons, warnings
+    return "Лапароскопический", level, pros, cons, warnings
 
 
-def decide_access_resection(pt: PatientData) -> tuple[str, str, List[str], List[str], List[str]]:
+# =============================================================
+# ШАГ 2б: Определение доступа при резекции
+# =============================================================
+def decide_access_resection(pt: PatientData):
     """
-    ШАГ 2 (для резекции): Определение доступа.
+    Возвращает: access, level, pros, cons, warnings
     """
     pros, cons, warnings = [], [], []
+    extended_flags = []
 
-    # Абсолютные противопоказания
-    if pt.distant_mets:
-        cons.append("❌ Наличие отдалённых метастазов")
-    if pt.lymphadenopathy:
-        cons.append("❌ Наличие лимфаденопатии")
-    if pt.localization != "Полюсная":
-        cons.append(f"❌ Локализация «{pt.localization}» — требуется полюсная")
-
-    # Оценка объёма
+    # Проверка объёма
     if pt.tumor_volume > RESECTION_LAP_MAX_VOLUME:
         cons.append(
-            f"❌ Объём опухоли ({pt.tumor_volume:.1f} см³) превышает "
+            f"Объём опухоли ({pt.tumor_volume:.1f} см³) превышает "
             f"рекомендованный порог для лапароскопической резекции "
             f"({RESECTION_LAP_MAX_VOLUME} см³)"
         )
+        if pt.tumor_volume > 317:  # выше максимума в серии
+            return "Открытый", LEVEL_STANDARD, pros, cons, warnings
+        else:
+            extended_flags.append("превышение порога объёма опухоли")
+            warnings.append(
+                f"Объём опухоли превышает стандартный порог, но находится в пределах "
+                f"максимального опыта серии (до 317 см³). Возможно выполнение "
+                f"в специализированном центре по решению консилиума."
+            )
     else:
         pros.append(
-            f"✅ Объём опухоли ({pt.tumor_volume:.1f} см³) — в пределах "
-            f"рекомендованного порога (≤{RESECTION_LAP_MAX_VOLUME} см³)"
+            f"Объём опухоли ({pt.tumor_volume:.1f} см³) — в пределах "
+            f"рекомендованного порога (<={RESECTION_LAP_MAX_VOLUME} см³)"
         )
 
-    # Если есть противопоказания
-    if cons:
-        return "Открытый", "", pros, cons, warnings
+    # Локализация
+    if pt.localization == "Полюсная":
+        pros.append("Периферическая (полюсная) локализация опухоли")
+    else:
+        extended_flags.append(f"{pt.localization.lower()} локализация")
+        warnings.append(
+            f"{pt.localization} локализация опухоли — лапароскопическая резекция "
+            f"технически сложна. Решение принимается мультидисциплинарным консилиумом "
+            f"с учётом опыта хирургической бригады."
+        )
+
+    # Билатеральное поражение
+    if pt.side == "Билатеральная":
+        extended_flags.append("билатеральное поражение")
+        warnings.append(
+            "Билатеральное поражение — лапароскопическая резекция возможна "
+            "по решению консилиума с учётом опыта центра."
+        )
+
+    # Метастазы и лимфаденопатия
+    if pt.distant_mets:
+        extended_flags.append("отдалённые метастазы")
+        warnings.append(
+            "Наличие отдалённых метастазов — вопрос выбора доступа "
+            "решается индивидуально на консилиуме."
+        )
+
+    if pt.lymphadenopathy:
+        extended_flags.append("лимфаденопатия")
+        warnings.append(
+            "Лимфаденопатия — требуется адекватная лимфаденэктомия, "
+            "выполнимость лапароскопически обсуждается на консилиуме."
+        )
 
     # Положительные факторы
-    pros.append("✅ Периферическая (полюсная) локализация опухоли")
-    pros.append(f"✅ Сохраняемая паренхима — {pt.residual_parenchyma_pct}% (≥{MIN_RESIDUAL_PARENCHYMA}%)")
+    pros.append(f"Сохраняемая паренхима — {pt.residual_parenchyma_pct}% (>={MIN_RESIDUAL_PARENCHYMA}%)")
     if pt.margin_5mm_possible == "Да":
-        pros.append(f"✅ Возможность отступа ≥{MIN_MARGIN_MM} мм от края опухоли")
+        pros.append(f"Возможность отступа >={MIN_MARGIN_MM} мм от края опухоли")
 
+    # Обязательные предостережения
     warnings.append(
-        "⚠️ При невозможности интраоперационного определения границ резекции "
+        "При невозможности интраоперационного определения границ резекции "
         "(в том числе при интраоперационном УЗИ) показана конверсия в открытый доступ."
     )
     warnings.append(
-        "⚠️ Требуется срочное гистологическое исследование краёв резекции при "
-        "сомнительном макроскопическом статусе."
+        "Рекомендуется срочное гистологическое исследование краёв резекции "
+        "при сомнительном макроскопическом статусе."
     )
 
-    confidence = "Показания к лапароскопической резекции почки"
+    # Определение уровня рекомендации
+    if extended_flags:
+        level = LEVEL_EXTENDED
+        warnings.insert(0,
+            "Данный пациент отвечает расширенным показаниям к лапароскопической резекции. "
+            "Обязательно решение мультидисциплинарного консилиума."
+        )
+    else:
+        level = LEVEL_STANDARD
 
-    return "Лапароскопический", confidence, pros, cons, warnings
+    return "Лапароскопический", level, pros, cons, warnings
 
 
+# =============================================================
+# ГЛАВНАЯ ФУНКЦИЯ
+# =============================================================
 def make_decision(pt: PatientData) -> Decision:
     """Главная функция принятия решения."""
     decision = Decision()
 
     # Шаг 1: тип операции
-    operation, op_reasons = decide_operation_type(pt)
+    operation, op_level, op_pros, op_cons, op_warnings = decide_operation_type(pt)
     decision.operation_type = operation
+    decision.operation_level = op_level
 
     # Шаг 2: доступ
     if operation == "Нефрэктомия":
-        access, confidence, pros, cons, warnings = decide_access_nephrectomy(pt)
+        access, acc_level, acc_pros, acc_cons, acc_warnings = decide_access_nephrectomy(pt)
     else:
-        access, confidence, pros, cons, warnings = decide_access_resection(pt)
+        access, acc_level, acc_pros, acc_cons, acc_warnings = decide_access_resection(pt)
 
     decision.access = access
-    decision.confidence = confidence
-    decision.pros = op_reasons + pros
-    decision.cons = cons
-    decision.warnings = warnings
+    decision.access_level = acc_level
+    decision.pros = op_pros + acc_pros
+    decision.cons = op_cons + acc_cons
+    decision.warnings = op_warnings + acc_warnings
+
+    # Флаг консилиума
+    decision.consilium_required = (
+        op_level == LEVEL_EXTENDED or acc_level == LEVEL_EXTENDED
+    )
 
     return decision
